@@ -1,0 +1,10 @@
+project/project/
+project/target/
+target/
+*.class
+*.log
+.vscode/
+.idea/
+.ensime
+.ensime_cache/
+.DS_Store
