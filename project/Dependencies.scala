@@ -8,12 +8,22 @@ object Dependencies {
   )
 
   object V {
+    // Compile
+    val avro       = "1.8.2"
+    val enumeratum = "1.5.13"
+    val typesafe   = "1.3.2"
+
     // Test
-    val scalatest            = "3.0.5"
+    val scalatest  = "3.0.5"
   }
 
   val Libraries = Seq(
+    // Compile
+    "com.beachape"    %% "enumeratum" % V.enumeratum,
+    "org.apache.avro" %  "avro"       % V.avro,
+    "com.typesafe"    % "config"      % V.typesafe,
+
     // Test
-    "org.scalatest"              %% "scalatest"              % V.scalatest   % "test"
+    "org.scalatest" %% "scalatest" % V.scalatest % "test"
   )
 }
