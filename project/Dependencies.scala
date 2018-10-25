@@ -12,6 +12,7 @@ object Dependencies {
     val avro       = "1.8.2"
     val enumeratum = "1.5.13"
     val typesafe   = "1.3.2"
+    val classutil  = "1.3.0"
 
     // Test
     val scalatest  = "3.0.5"
@@ -20,8 +21,9 @@ object Dependencies {
   val Libraries = Seq(
     // Compile
     "com.beachape"    %% "enumeratum" % V.enumeratum,
+    "org.clapper"     %% "classutil"  % V.classutil,
     "org.apache.avro" %  "avro"       % V.avro,
-    "com.typesafe"    % "config"      % V.typesafe,
+    "com.typesafe"    %  "config"     % V.typesafe,
 
     // Test
     "org.scalatest" %% "scalatest" % V.scalatest % "test"

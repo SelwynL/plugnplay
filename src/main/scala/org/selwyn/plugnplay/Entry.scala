@@ -3,198 +3,19 @@ package org.selwyn.plugnplay
 import java.io.{File, FileFilter}
 import java.net.URLClassLoader
 import java.util.ServiceLoader
-import java.util.jar.JarFile
 
-import com.sun.net.httpserver.Authenticator.Failure
 import com.typesafe.config.{Config, ConfigFactory}
 import org.apache.avro.generic.GenericRecord
+import org.clapper.classutil.{ClassFinder, ClassInfo}
 import org.selwyn.plugnplay.Plugin.PluginLoadingException
 
 import scala.collection.JavaConverters._
-import scala.reflect.{classTag, ClassTag}
-import scala.util.{Failure, Success, Try}
-
-object Entry extends App {
-  val pluginPathname = "plugins"
-
-  // All "reference.conf" have substitutions resolved first, without "application.conf" in the stack, so the reference stack has to be self-contained
-  val conf = ConfigUtil.getConfig("plugnplay", ConfigFactory.load)
-
-  val pluginClassNameInput      = "org.selwyn.plugnplay.GenericRecordPollPlugin"
-  val pluginClassNameThroughput = "org.selwyn.plugnplay.FilterPlugin"
-  val pluginClassNameSink       = "org.selwyn.plugnplay.DynamoSinkPlugin"
-
-  val manager: PluginManager       = new PluginManager(ConfigUtil.getConfig("manager", conf))
-  val standardPlugins: Seq[String] = manager.standardPlugins
-  val customPlugins: Seq[String]   = manager.customPlugins
-
-  println(s"AVAILABLE STANDARD PLUGINS: $standardPlugins")
-  println(s"AVAILABLE CUSTOM PLUGINS: $customPlugins")
-
-  val plugins: Either[Throwable, (SourcePlugin, ProcessPlugin, SinkPlugin)] = for {
-    so <- manager.makeSourcePlugin("org.selwyn.plugnplay.KafkaSourcePlugin", ConfigFactory.empty)
-    pr <- manager.makeProcessPlugin("org.selwyn.plugnplay.FilterPlugin", ConfigFactory.empty)
-    si <- manager.makeSinkPlugin("org.selwyn.plugnplay.DynamoDBSinkPlugin", ConfigFactory.empty)
-  } yield (so, pr, si)
-
-  val success: Boolean = plugins match {
-    case Right((sourcePlugin, processPlugin, sinkPlugin)) =>
-      println(" >> PLUGINS INITIALIZED...")
-      val input     = sourcePlugin.poll(Some(1000l))
-      val processed = processPlugin.process(input)
-      sinkPlugin.sink(processed)
-    case Left(err: Throwable) =>
-      println(s"FAILED TO LOAD: ${err.getMessage}")
-      err.printStackTrace()
-      false
-  }
-
-  println(" >> DONE!")
-}
-
-class PluginManager(managerConfig: Config) {
-
-  private val defaultExtension = ".jar"
-  private val defaultPathname  = "plugin"
-
-  private val extension = ConfigUtil.getStringOption("custom.extension", managerConfig).getOrElse(defaultExtension)
-  private val pathname  = ConfigUtil.getStringOption("custom.pathname", managerConfig).getOrElse(defaultPathname)
-
-  private val pluginFilesEither = Plugin.loadFiles(pathname, extension)
-
-  private val classLoaderEither = for {
-    files  <- pluginFilesEither
-    loader <- Plugin.loadClassLoader(files)
-  } yield loader
-
-  /**
-    * Lists the loaded plugins available to be made with the methods provided
-    */
-  val customPlugins: Seq[String] = (for {
-    files      <- pluginFilesEither
-    jarFiles   <- Try(files.map(f => new JarFile(f))).toEither
-    jarEntries <- Try(jarFiles.flatMap(_.entries().asScala)).toEither
-  } yield jarEntries.map(_.getName)) match {
-    case Right(cn: Seq[String]) => Plugin.filterClasses(cn, classTag[Plugin].runtimeClass)
-    case Left(err: Throwable) =>
-      println(s"Unable to load any custom plugins: ${err.getMessage}")
-      Seq.empty
-  }
-
-  /**
-    * Lists the standard plugins available to be made with the methods provided
-    */
-  val standardPlugins: Seq[String] = ServiceLoader
-    .load(classTag[Plugin].runtimeClass, this.getClass.getClassLoader)
-    .asScala
-    .map({ case p: Plugin => p.getClass.getCanonicalName })
-    .toSeq
-
-  /**
-    * Creates a new "process" plugin instance
-    * @param name   Classname of the plugin to load
-    * @param config Config to pass into the constructor of the plugin
-    * @return
-    */
-  def makeProcessPlugin(name: String, config: Config): Either[Throwable, ProcessPlugin] =
-    makePlugin[ProcessPlugin](name, config)
-
-  /**
-    * Creates a new "source" plugin instance
-    * @param name   Classname of the plugin to load
-    * @param config Config to pass into the constructor of the plugin
-    * @return
-    */
-  def makeSourcePlugin(name: String, config: Config): Either[Throwable, SourcePlugin] =
-    makePlugin[SourcePlugin](name, config)
-
-  /**
-    * Creates a new "sink" plugin instance
-    * @param name   Classname of the plugin to load
-    * @param config Config to pass into the constructor of the plugin
-    * @return
-    */
-  def makeSinkPlugin(name: String, config: Config): Either[Throwable, SinkPlugin] =
-    makePlugin[SinkPlugin](name, config)
-
-  private def makePlugin[P: ClassTag](name: String, config: Config): Either[Throwable, P] =
-    for {
-      loader   <- classLoaderEither
-      instance <- Try(loader.loadClass(name).getConstructor(classOf[Config]).newInstance(config)).toEither
-      plugin   <- GenericUtil.getTypedArg[P](instance)
-    } yield plugin
-}
-
-object ConfigUtil {
-
-  private def tryGet[T](key: String, get: String => T): Option[T] =
-    Try(get(key)).toOption
-
-  def getStringOption(key: String, config: Config): Option[String] =
-    tryGet(key, k => config.getString(k))
-
-  def getConfigOption(key: String, config: Config): Option[Config] =
-    tryGet(key, k => config.getConfig(k))
-
-  /**
-    * Get configuration object. Defaults to empty return value
-    */
-  def getConfig(key: String, config: Config): Config =
-    getConfigOption(key, config).getOrElse(ConfigFactory.empty())
-}
-
-object GenericUtil {
-
-  /**
-    * Utility function to replace "asInstanceOf[T]
-    * @param any  The value to be cast
-    * @tparam T   The generic type to cast to
-    * @return
-    */
-  def getTypedArg[T: ClassTag](any: Any): Either[Throwable, T] = {
-    any match {
-      case Success(t: T) => Right(t)
-      case _             => Left(PluginLoadingException(s"Type does not match class '${classTag[T].runtimeClass}'"))
-    }
-  }
-}
-
-object Plugin {
-  case class PluginLoadingException(s: String) extends RuntimeException(s)
-  type PluginOutcome = Either[Throwable, Seq[GenericRecord]]
-
-  def loadFiles(pathname: String, fileExtension: String): Either[Throwable, Seq[File]] =
-    Try {
-      val file = new File(pathname)
-      if (file.exists() && file.isDirectory) {
-        file
-          .listFiles(new FileFilter {
-            override def accept(pathname: File): Boolean = pathname.getPath.toLowerCase.endsWith(fileExtension)
-          })
-          .toList
-      } else {
-        Seq.empty
-      }
-    }.toEither
-
-  def loadClassLoader(files: Seq[File]): Either[Throwable, URLClassLoader] =
-    Try(new URLClassLoader(files.map(f => f.toURI.toURL).toArray)).toEither
-
-  def fromFiles[T](files: Seq[File], clazz: Class[T]): Either[Throwable, Seq[T]] =
-    loadClassLoader(files).map(l => ServiceLoader.load(clazz, l).asScala.toList)
-
-  def filterClasses[T](classNames: Seq[String], target: Class[T]): Seq[String] =
-    classNames.filter(n =>
-      Try(Class.forName(n)) match {
-        case Success(c: Class[_]) => c.isInstance(target)
-        case _                    => false
-    })
-}
+import scala.util.{Success, Try}
 
 trait Plugin {
-  val name: String
-  val version: String
-  val author: String
+  def name: String
+  def version: String
+  def author: String
 }
 
 trait SourcePlugin extends Plugin {
@@ -240,15 +61,137 @@ class FilterPlugin(config: Config) extends ProcessPlugin {
     println("filtering...")
     records
   }
-
 }
 
-case class PluginData(dataType: PluginDataType, data: Array[Byte])
+object Entry extends App {
+  val pluginPathname = "plugins"
 
-sealed abstract class PluginDataType extends EnumEntry
-object PluginDataType extends Enum[PluginDataType] {
- val values: IndexedSeq[PluginDataType] = findValues
- case object Integer extends PluginDataType
- case object String  extends PluginDataType
- case object Avro    extends PluginDataType
+  // All "reference.conf" have substitutions resolved first, without "application.conf" in the stack, so the reference stack has to be self-contained
+  val conf = ConfigUtil.getConfig("plugnplay", ConfigFactory.load)
+
+  // Instantiate PluginManager. Available plugins are loaded once upon initialization.
+  val manager: PluginManager                                  = new PluginManager(ConfigUtil.getConfig("manager", conf))
+  val loadablePlugins: Map[String, ClassAndInfo[_ >: Plugin]] = manager.plugins
+
+  println(s"AVAILABLE STANDARD PLUGINS: \n$loadablePlugins")
+
+  val output = for {
+    source <- manager.makeSourcePlugin("org.selwyn.plugnplay.KafkaSourcePlugin", ConfigFactory.empty)
+    filter <- manager.makeProcessPlugin("org.selwyn.plugnplay.FilterPlugin", ConfigFactory.empty)
+    output <- manager.makeSinkPlugin("org.selwyn.plugnplay.DynamoDBSinkPlugin", ConfigFactory.empty)
+  } yield output.sink(filter.process(source.poll(Some(100l))))
+
+  println(s"COMPLETED: $output")
+}
+
+final case class ClassAndInfo[P <: Plugin](clazz: Class[P], info: ClassInfo)
+
+class PluginManager(managerConfig: Config) {
+
+  // TODO: load plugins from side directory
+  private val defaultPluginPathname = "plugin"
+  private val pluginPath            = ConfigUtil.getStringOption("custom.pathname", managerConfig).getOrElse(defaultPluginPathname)
+
+  // ClassFinder avoids both the class loader (for simplicity) and reflection (for speed)
+  private val classpath: Seq[File]             = Seq(".").map(new File(_))
+  private val finder: ClassFinder              = ClassFinder(classpath)
+  private val classMap: Map[String, ClassInfo] = ClassFinder.classInfoMap(finder.getClasses)
+
+  // All loadable plugins available for use
+  val plugins: Map[String, ClassAndInfo[Plugin]] =
+    ClassFinder.concreteSubclasses(classOf[Plugin], classMap).foldLeft(Map[String, ClassAndInfo[Plugin]]()) { (m, i) =>
+      {
+        // Filter out classes that are not in the current classloader
+        Try(Class.forName(i.name)) match {
+          case Success(p: Class[Plugin]) => m + (i.name -> ClassAndInfo(p, i))
+          case _                         => m
+        }
+      }
+    }
+
+  /**
+    * Creates a new "process" plugin instance
+    * @param name   Classname of the plugin to load
+    * @param config Config to pass into the constructor of the plugin
+    * @return
+    */
+  def makeProcessPlugin(name: String, config: Config): Either[Throwable, ProcessPlugin] =
+    makePlugin[ProcessPlugin](name, config)
+
+  /**
+    * Creates a new "source" plugin instance
+    * @param name   Classname of the plugin to load
+    * @param config Config to pass into the constructor of the plugin
+    * @return
+    */
+  def makeSourcePlugin(name: String, config: Config): Either[Throwable, SourcePlugin] =
+    makePlugin[SourcePlugin](name, config)
+
+  /**
+    * Creates a new "sink" plugin instance
+    * @param name   Classname of the plugin to load
+    * @param config Config to pass into the constructor of the plugin
+    * @return
+    */
+  def makeSinkPlugin(name: String, config: Config): Either[Throwable, SinkPlugin] =
+    makePlugin[SinkPlugin](name, config)
+
+  // TODO: Remove usage of 'asInstanceOf[P]'
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def makePlugin[P <: Plugin](name: String, config: Config): Either[Throwable, P] =
+    for {
+      infoEntry   <- plugins.get(name).toRight(PluginLoadingException(s"No plugin by name '$name' found."))
+      plugin      <- Try(infoEntry.clazz.getConstructor(classOf[Config]).newInstance(config)).toEither
+      typedPlugin <- Try(plugin.asInstanceOf[P]).toEither
+    } yield typedPlugin
+}
+
+object ConfigUtil {
+
+  private def tryGet[T](key: String, get: String => T): Option[T] =
+    Try(get(key)).toOption
+
+  def getStringOption(key: String, config: Config): Option[String] =
+    tryGet(key, k => config.getString(k))
+
+  def getConfigOption(key: String, config: Config): Option[Config] =
+    tryGet(key, k => config.getConfig(k))
+
+  /**
+    * Get configuration object. Defaults to empty return value
+    */
+  def getConfig(key: String, config: Config): Config =
+    getConfigOption(key, config).getOrElse(ConfigFactory.empty())
+}
+
+object Plugin {
+  case class PluginLoadingException(s: String) extends RuntimeException(s)
+  type PluginOutcome = Either[Throwable, Seq[GenericRecord]]
+
+  def loadFiles(pathname: String, fileExtension: String): Either[Throwable, Seq[File]] =
+    Try {
+      val file = new File(pathname)
+      if (file.exists() && file.isDirectory) {
+        file
+          .listFiles(new FileFilter {
+            override def accept(pathname: File): Boolean = pathname.getPath.toLowerCase.endsWith(fileExtension)
+          })
+          .toList
+      } else {
+        Seq.empty
+      }
+    }.toEither
+
+  def loadClassLoader(files: Seq[File]): Either[Throwable, URLClassLoader] =
+    Try(new URLClassLoader(files.map(f => f.toURI.toURL).toArray)).toEither
+
+  def fromFiles[T](files: Seq[File], clazz: Class[T]): Either[Throwable, Seq[T]] =
+    loadClassLoader(files).map(l => ServiceLoader.load(clazz, l).asScala.toList)
+
+  def filterClasses[T](classNames: Seq[String], target: Class[T]): Seq[String] =
+    classNames.filter(n =>
+      Try(Class.forName(n)) match {
+        case Success(c: Class[_]) => c.isInstance(target)
+        case _                    => false
+    })
 }
