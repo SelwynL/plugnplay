@@ -86,7 +86,6 @@ final case class ClassAndInfo[P <: Plugin](clazz: Class[P], info: ClassInfo)
 
 class PluginManager(managerConfig: Config) {
 
-  // TODO: load plugins from side directory
   private val defaultPluginPathname = "plugin"
   private val pluginPath            = ConfigUtil.getStringOption("custom.pathname", managerConfig).getOrElse(defaultPluginPathname)
 
