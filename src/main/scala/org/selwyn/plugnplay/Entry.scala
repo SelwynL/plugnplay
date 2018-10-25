@@ -1,16 +1,14 @@
 package org.selwyn.plugnplay
 
-import java.io.{File, FileFilter}
-import java.net.URLClassLoader
-import java.util.ServiceLoader
+import java.io.File
 
 import com.typesafe.config.{Config, ConfigFactory}
 import org.apache.avro.generic.GenericRecord
 import org.clapper.classutil.{ClassFinder, ClassInfo}
-import org.selwyn.plugnplay.Plugin.PluginLoadingException
 
-import scala.collection.JavaConverters._
 import scala.util.{Success, Try}
+
+case class PluginLoadingException(s: String) extends RuntimeException(s)
 
 trait Plugin {
   def name: String
@@ -93,7 +91,7 @@ class PluginManager(managerConfig: Config) {
   private val pluginPath            = ConfigUtil.getStringOption("custom.pathname", managerConfig).getOrElse(defaultPluginPathname)
 
   // ClassFinder avoids both the class loader (for simplicity) and reflection (for speed)
-  private val classpath: Seq[File]             = Seq(".").map(new File(_))
+  private val classpath: Seq[File]             = Seq(".", pluginPath).map(new File(_))
   private val finder: ClassFinder              = ClassFinder(classpath)
   private val classMap: Map[String, ClassInfo] = ClassFinder.classInfoMap(finder.getClasses)
 
@@ -162,36 +160,4 @@ object ConfigUtil {
     */
   def getConfig(key: String, config: Config): Config =
     getConfigOption(key, config).getOrElse(ConfigFactory.empty())
-}
-
-object Plugin {
-  case class PluginLoadingException(s: String) extends RuntimeException(s)
-  type PluginOutcome = Either[Throwable, Seq[GenericRecord]]
-
-  def loadFiles(pathname: String, fileExtension: String): Either[Throwable, Seq[File]] =
-    Try {
-      val file = new File(pathname)
-      if (file.exists() && file.isDirectory) {
-        file
-          .listFiles(new FileFilter {
-            override def accept(pathname: File): Boolean = pathname.getPath.toLowerCase.endsWith(fileExtension)
-          })
-          .toList
-      } else {
-        Seq.empty
-      }
-    }.toEither
-
-  def loadClassLoader(files: Seq[File]): Either[Throwable, URLClassLoader] =
-    Try(new URLClassLoader(files.map(f => f.toURI.toURL).toArray)).toEither
-
-  def fromFiles[T](files: Seq[File], clazz: Class[T]): Either[Throwable, Seq[T]] =
-    loadClassLoader(files).map(l => ServiceLoader.load(clazz, l).asScala.toList)
-
-  def filterClasses[T](classNames: Seq[String], target: Class[T]): Seq[String] =
-    classNames.filter(n =>
-      Try(Class.forName(n)) match {
-        case Success(c: Class[_]) => c.isInstance(target)
-        case _                    => false
-    })
 }
