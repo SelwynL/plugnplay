@@ -62,7 +62,6 @@ class FilterPlugin(config: Config) extends ProcessPlugin {
 }
 
 object Entry extends App {
-  val pluginPathname = "plugins"
 
   // All "reference.conf" have substitutions resolved first, without "application.conf" in the stack, so the reference stack has to be self-contained
   val conf = ConfigUtil.getConfig("plugnplay", ConfigFactory.load)
