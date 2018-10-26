@@ -6,82 +6,85 @@ import com.typesafe.config.{Config, ConfigFactory}
 import org.apache.avro.generic.GenericRecord
 import org.clapper.classutil.{ClassFinder, ClassInfo}
 
+import scala.reflect.ClassTag
 import scala.util.{Success, Try}
 
-case class PluginLoadingException(s: String) extends RuntimeException(s)
+final case class PluginLoadingException(s: String) extends RuntimeException(s)
 
-trait Plugin {
+trait Plugin[I, O] {
   def name: String
   def version: String
   def author: String
+  def process(in: I): O
 }
 
-trait SourcePlugin extends Plugin {
-  def poll(timeout: Option[Long]): Seq[GenericRecord]
-}
+trait SourcePlugin[O]  extends Plugin[Long, O]    {}
+trait SinkPlugin[I]    extends Plugin[I, Boolean] {}
+trait FlowPlugin[I, O] extends Plugin[I, O]       {}
+trait FilterPlugin[F]  extends FlowPlugin[F, F]   {}
 
-trait SinkPlugin extends Plugin {
-  def sink(records: Seq[GenericRecord]): Boolean
-}
-
-trait ProcessPlugin extends Plugin {
-  def process(records: Seq[GenericRecord]): Seq[GenericRecord]
-}
-
-class DynamoDBSinkPlugin(config: Config) extends SinkPlugin {
+class DynamoDBSinkPlugin(config: Config) extends SinkPlugin[Seq[GenericRecord]] {
   override val name: String    = "dynamo-sink"
   override val version: String = "v0.1"
   override val author: String  = "selwyn lehmann"
 
-  override def sink(records: Seq[GenericRecord]): Boolean = {
+  override def process(in: Seq[GenericRecord]): Boolean = {
     println("sinking...")
     true
   }
 }
 
-class KafkaSourcePlugin(config: Config) extends SourcePlugin {
+class KafkaSourcePlugin(config: Config) extends SourcePlugin[Seq[GenericRecord]] {
   override val name: String    = "kafka-source"
   override val version: String = "v0.1"
   override val author: String  = "selwyn lehmann"
 
-  override def poll(timeout: Option[Long]): Seq[GenericRecord] = {
+  override def process(in: Long): Seq[GenericRecord] = {
     println("polling...")
     Seq.empty
   }
 }
 
-class FilterPlugin(config: Config) extends ProcessPlugin {
+class GenericRecordFilterPlugin(config: Config) extends FilterPlugin[Seq[GenericRecord]] {
   override val name: String    = "dynamo-sink"
   override val version: String = "v0.1"
   override val author: String  = "selwyn lehmann"
 
-  override def process(records: Seq[GenericRecord]): Seq[GenericRecord] = {
+  override def process(in: Seq[GenericRecord]): Seq[GenericRecord] = {
     println("filtering...")
-    records
+    in
   }
 }
 
 object Entry extends App {
 
   // All "reference.conf" have substitutions resolved first, without "application.conf" in the stack, so the reference stack has to be self-contained
-  val conf = ConfigUtil.getConfig("plugnplay", ConfigFactory.load)
+  val conf: Config = ConfigUtil.getConfig("plugnplay", ConfigFactory.load)
 
   // Instantiate PluginManager. Available plugins are loaded once upon initialization.
-  val manager: PluginManager                                  = new PluginManager(ConfigUtil.getConfig("manager", conf))
-  val loadablePlugins: Map[String, ClassAndInfo[_ >: Plugin]] = manager.plugins
-
+  val manager: PluginManager                                   = new PluginManager(ConfigUtil.getConfig("manager", conf))
+  val loadablePlugins: Map[String, ClassAndInfo[Plugin[_, _]]] = manager.plugins
   println(s"AVAILABLE STANDARD PLUGINS: \n$loadablePlugins")
 
-  val output = for {
-    source <- manager.makeSourcePlugin("org.selwyn.plugnplay.KafkaSourcePlugin", ConfigFactory.empty)
-    filter <- manager.makeProcessPlugin("org.selwyn.plugnplay.FilterPlugin", ConfigFactory.empty)
-    output <- manager.makeSinkPlugin("org.selwyn.plugnplay.DynamoDBSinkPlugin", ConfigFactory.empty)
-  } yield output.sink(filter.process(source.poll(Some(100l))))
+  def execute[T](source: (String, Config) => Either[Throwable, SourcePlugin[T]],
+                 filter: (String, Config) => Either[Throwable, FlowPlugin[T, T]],
+                 output: (String, Config) => Either[Throwable, SinkPlugin[T]]): Either[Throwable, Boolean] = {
+    for {
+      s <- source("org.selwyn.plugnplay.KafkaSourcePlugin", ConfigFactory.empty)
+      f <- filter("org.selwyn.plugnplay.GenericRecordFilterPlugin", ConfigFactory.empty)
+      o <- output("org.selwyn.plugnplay.DynamoDBSinkPlugin", ConfigFactory.empty)
+    } yield o.process(f.process(s.process(100l)))
+  }
 
+  val output: Either[Throwable, Boolean] = execute[Seq[GenericRecord]](
+    (s, c) => manager.makeSourcePlugin[Seq[GenericRecord]](s, c),
+    (s, c) => manager.makeFlowPlugin[Seq[GenericRecord], Seq[GenericRecord]](s, c),
+    (s, c) => manager.makeSinkPlugin[Seq[GenericRecord]](s, c),
+  )
   println(s"COMPLETED: $output")
 }
 
-final case class ClassAndInfo[P <: Plugin](clazz: Class[P], info: ClassInfo)
+final case class ClassAndInfo[P <: Plugin[_, _]](clazz: ClassTag[P], info: ClassInfo)
 
 class PluginManager(managerConfig: Config) {
 
@@ -94,25 +97,27 @@ class PluginManager(managerConfig: Config) {
   private val classMap: Map[String, ClassInfo] = ClassFinder.classInfoMap(finder.getClasses)
 
   // All loadable plugins available for use
-  val plugins: Map[String, ClassAndInfo[Plugin]] =
-    ClassFinder.concreteSubclasses(classOf[Plugin], classMap).foldLeft(Map[String, ClassAndInfo[Plugin]]()) { (m, i) =>
-      {
-        // Filter out classes that are not in the current classloader
-        Try(Class.forName(i.name)) match {
-          case Success(p: Class[Plugin]) => m + (i.name -> ClassAndInfo(p, i))
-          case _                         => m
+  val plugins: Map[String, ClassAndInfo[Plugin[_, _]]] =
+    ClassFinder
+      .concreteSubclasses(classOf[Plugin[_, _]], classMap)
+      .foldLeft(Map[String, ClassAndInfo[Plugin[_, _]]]()) { (m, i) =>
+        {
+          // Filter out classes that are not in the current classloader
+          Try(Class.forName(i.name)) match {
+            case Success(p) => m + (i.name -> ClassAndInfo(ClassTag(p), i))
+            case _          => m
+          }
         }
       }
-    }
 
   /**
-    * Creates a new "process" plugin instance
+    * Creates a new "flow" plugin instance
     * @param name   Classname of the plugin to load
     * @param config Config to pass into the constructor of the plugin
     * @return
     */
-  def makeProcessPlugin(name: String, config: Config): Either[Throwable, ProcessPlugin] =
-    makePlugin[ProcessPlugin](name, config)
+  def makeFlowPlugin[I, O](name: String, config: Config): Either[Throwable, FlowPlugin[I, O]] =
+    makePlugin[FlowPlugin[I, O]](name, config)
 
   /**
     * Creates a new "source" plugin instance
@@ -120,8 +125,8 @@ class PluginManager(managerConfig: Config) {
     * @param config Config to pass into the constructor of the plugin
     * @return
     */
-  def makeSourcePlugin(name: String, config: Config): Either[Throwable, SourcePlugin] =
-    makePlugin[SourcePlugin](name, config)
+  def makeSourcePlugin[O](name: String, config: Config): Either[Throwable, SourcePlugin[O]] =
+    makePlugin[SourcePlugin[O]](name, config)
 
   /**
     * Creates a new "sink" plugin instance
@@ -129,15 +134,15 @@ class PluginManager(managerConfig: Config) {
     * @param config Config to pass into the constructor of the plugin
     * @return
     */
-  def makeSinkPlugin(name: String, config: Config): Either[Throwable, SinkPlugin] =
-    makePlugin[SinkPlugin](name, config)
+  def makeSinkPlugin[I](name: String, config: Config): Either[Throwable, SinkPlugin[I]] =
+    makePlugin[SinkPlugin[I]](name, config)
 
   // TODO: Remove usage of 'asInstanceOf[P]'
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-  private def makePlugin[P <: Plugin](name: String, config: Config): Either[Throwable, P] =
+  private def makePlugin[P <: Plugin[_, _]](name: String, config: Config): Either[Throwable, P] =
     for {
       infoEntry   <- plugins.get(name).toRight(PluginLoadingException(s"No plugin by name '$name' found."))
-      plugin      <- Try(infoEntry.clazz.getConstructor(classOf[Config]).newInstance(config)).toEither
+      plugin      <- Try(infoEntry.clazz.runtimeClass.getConstructor(classOf[Config]).newInstance(config)).toEither
       typedPlugin <- Try(plugin.asInstanceOf[P]).toEither
     } yield typedPlugin
 }
