@@ -57,11 +57,10 @@ object BuildSettings {
   )
 
   import wartremover.Wart
-  import wartremover.Wart._
   import wartremover.WartRemover.autoImport._
   lazy val wartremoverSettings = Seq(
     // only apply wartremover during compile, not test
-    wartremoverErrors in(Compile, compile) := Warts.allBut(Wart.Any, Wart.Nothing)
+    wartremoverErrors in(Compile, compile) := Warts.allBut(Wart.Any, Wart.Nothing, Wart.Equals, Wart.ArrayEquals)
   )
 
 }

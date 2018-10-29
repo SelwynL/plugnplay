@@ -1,30 +1,29 @@
 package org.selwyn.plugnplay
 
 import java.io.File
+import java.lang.reflect.Method
 
 import com.typesafe.config.{Config, ConfigFactory}
-import org.apache.avro.generic.GenericRecord
+import org.apache.avro.{Schema, SchemaBuilder}
+import org.apache.avro.generic.{GenericData, GenericRecord}
 import org.clapper.classutil.{ClassFinder, ClassInfo}
 
-import scala.reflect.runtime.universe.{Type, TypeTag}
-import scala.util.{Success, Try}
+import scala.util.{Failure, Success, Try}
 
+final case class ClassAndInfo(clazz: Class[_], info: ClassInfo, input: Array[Class[_]], output: Class[_])
 final case class PluginLoadingException(s: String) extends RuntimeException(s)
 
-trait Plugin[I, O] {
+abstract class Plugin[I, O] {
   def name: String
   def version: String
   def author: String
   def process(in: I): O
-
-  def inType()(implicit i: TypeTag[I]): Type   = i.tpe
-  def outTypeT()(implicit o: TypeTag[O]): Type = o.tpe
 }
 
-trait SourcePlugin[O]  extends Plugin[Long, O]    {}
-trait SinkPlugin[I]    extends Plugin[I, Boolean] {}
-trait FlowPlugin[I, O] extends Plugin[I, O]       {}
-trait FilterPlugin[F]  extends FlowPlugin[F, F]   {}
+abstract class SourcePlugin[O]  extends Plugin[Long, O]    {}
+abstract class SinkPlugin[I]    extends Plugin[I, Boolean] {}
+abstract class FlowPlugin[I, O] extends Plugin[I, O]       {}
+abstract class FilterPlugin[F]  extends FlowPlugin[F, F]   {}
 
 class DynamoDBSinkPlugin(config: Config) extends SinkPlugin[Seq[GenericRecord]] {
   override val name: String    = "dynamo-sink"
@@ -45,6 +44,40 @@ class KafkaSourcePlugin(config: Config) extends SourcePlugin[Seq[GenericRecord]]
   override def process(in: Long): Seq[GenericRecord] = {
     println("polling...")
     Seq.empty
+  }
+}
+
+class StringToIntFlowPlugin(config: Config) extends FlowPlugin[String, Int] {
+  override def name: String    = "string-to-int"
+  override def version: String = "v0.1"
+  override def author: String  = "selwyn lehmann"
+
+  override def process(in: String): Int = {
+    println("flowing s->i ...")
+    0
+  }
+}
+
+class StringToGenericRecordFlowPlugin(config: Config) extends FlowPlugin[String, GenericRecord] {
+  override def name: String    = "string-to-generic-record"
+  override def version: String = "v0.1"
+  override def author: String  = "selwyn lehmann"
+
+  override def process(in: String): GenericRecord = {
+    println("flowing s->gr ...")
+
+    val schema: Schema = SchemaBuilder
+      .record(in)
+      .fields()
+      .requiredString("myString")
+      .requiredInt("myInt")
+      .endRecord()
+
+    val record = new GenericData.Record(schema)
+    record.put("myString", "myValue")
+    record.put("myInt", 0)
+
+    record
   }
 }
 
@@ -69,27 +102,67 @@ object Entry extends App {
   val loadablePlugins: Map[String, ClassAndInfo] = manager.plugins
   println(s"AVAILABLE STANDARD PLUGINS: \n${loadablePlugins.keys}")
 
-  def execute[T](source: (String, Config) => Either[Throwable, SourcePlugin[T]],
-                 filter: (String, Config) => Either[Throwable, FlowPlugin[T, T]],
-                 output: (String, Config) => Either[Throwable, SinkPlugin[T]]): Either[Throwable, Boolean] = {
-    for {
-      s <- source("org.selwyn.plugnplay.KafkaSourcePlugin", ConfigFactory.empty)
-      f <- filter("org.selwyn.plugnplay.GenericRecordFilterPlugin", ConfigFactory.empty)
-      o <- output("org.selwyn.plugnplay.DynamoDBSinkPlugin", ConfigFactory.empty)
-    } yield o.process(f.process(s.process(100l)))
-  }
+  // Validate input and output are as expected
+  val pluginName = "org.selwyn.plugnplay.StringToGenericRecordFlowPlugin"
 
-  val output: Either[Throwable, Boolean] = execute[Seq[GenericRecord]](
-    (s, c) => manager.makeSourcePlugin[Seq[GenericRecord]](s, c),
-    (s, c) => manager.makeFlowPlugin[Seq[GenericRecord], Seq[GenericRecord]](s, c),
-    (s, c) => manager.makeSinkPlugin[Seq[GenericRecord]](s, c),
-  )
+  val pluginClassInfo: Unit = loadablePlugins
+    .get(pluginName)
+    .foreach(i => {
+      println(s"PLUGIN IN: ${i.input.foldLeft(List[String]()) { (l, i) =>
+        { l :+ i.getName }
+      }}")
+      println(s"PLUGIN OUT: ${i.output}")
+
+      assert(i.input.sameElements(Array(classOf[String])))
+      assert(i.output.equals(classOf[GenericRecord]))
+    })
+
+  // Validate plugins message passing
+  val output: Either[Throwable, Boolean] = for {
+    s <- manager.makeSourcePlugin[Seq[GenericRecord]]("org.selwyn.plugnplay.KafkaSourcePlugin", ConfigFactory.empty)
+    f <- manager.makeFlowPlugin[Seq[GenericRecord], Seq[GenericRecord]](
+      "org.selwyn.plugnplay.GenericRecordFilterPlugin",
+      ConfigFactory.empty)
+    o <- manager.makeSinkPlugin[Seq[GenericRecord]]("org.selwyn.plugnplay.DynamoDBSinkPlugin", ConfigFactory.empty)
+  } yield {
+    o.process(f.process(s.process(100l)))
+  }
+  assert(output.isRight)
+
   println(s"COMPLETED: $output")
 }
 
-final case class ClassAndInfo(clazz: Class[_], info: ClassInfo)
+object PluginManager {
+
+  def getMethod(c: Class[_], methodName: String): Either[Throwable, Method] =
+    Try {
+      c.getMethods.filter(m =>
+        m.getName.contains(methodName) && !m.getReturnType.getCanonicalName.equalsIgnoreCase("java.lang.Object"))
+    } match {
+      case Success(methods) =>
+        methods.headOption.toRight(
+          PluginLoadingException(s"No appropriate method for 'process' found in '${c.getCanonicalName}'"))
+      case Failure(err) => Left(err)
+    }
+
+  def foldClassAndInfo(m: Map[String, ClassAndInfo], i: ClassInfo): Map[String, ClassAndInfo] =
+    Try(Class.forName(i.name)) match {
+      case Success(c) =>
+        // Grab the input and output class of the plugin's "process" method
+        getMethod(c, "process") match {
+          case Right(method) => m + (i.name -> ClassAndInfo(c, i, method.getParameterTypes, method.getReturnType))
+          case Left(err) =>
+            println(s"Unable to load plugin '${i.name}': ${err.getMessage}")
+            m
+        }
+      case Failure(err) =>
+        println(s"Unable to load plugin '${i.name}': ${err.getMessage}")
+        m
+    }
+}
 
 class PluginManager(managerConfig: Config) {
+  import PluginManager._
 
   private val defaultPluginPathname = "plugin"
   private val pluginPath            = ConfigUtil.getStringOption("custom.pathname", managerConfig).getOrElse(defaultPluginPathname)
@@ -106,10 +179,7 @@ class PluginManager(managerConfig: Config) {
       .foldLeft(Map[String, ClassAndInfo]()) { (m, i) =>
         {
           // Filter out classes that are not in the current classloader
-          Try(Class.forName(i.name)) match {
-            case Success(p) => m + (i.name -> ClassAndInfo(p, i))
-            case _          => m
-          }
+          foldClassAndInfo(m, i)
         }
       }
 
