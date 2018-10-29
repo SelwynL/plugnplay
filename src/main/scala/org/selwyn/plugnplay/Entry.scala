@@ -6,7 +6,7 @@ import com.typesafe.config.{Config, ConfigFactory}
 import org.apache.avro.generic.GenericRecord
 import org.clapper.classutil.{ClassFinder, ClassInfo}
 
-import scala.reflect.ClassTag
+import scala.reflect.runtime.universe.{Type, TypeTag}
 import scala.util.{Success, Try}
 
 final case class PluginLoadingException(s: String) extends RuntimeException(s)
@@ -16,6 +16,9 @@ trait Plugin[I, O] {
   def version: String
   def author: String
   def process(in: I): O
+
+  def inType()(implicit i: TypeTag[I]): Type   = i.tpe
+  def outTypeT()(implicit o: TypeTag[O]): Type = o.tpe
 }
 
 trait SourcePlugin[O]  extends Plugin[Long, O]    {}
@@ -62,9 +65,9 @@ object Entry extends App {
   val conf: Config = ConfigUtil.getConfig("plugnplay", ConfigFactory.load)
 
   // Instantiate PluginManager. Available plugins are loaded once upon initialization.
-  val manager: PluginManager                                   = new PluginManager(ConfigUtil.getConfig("manager", conf))
-  val loadablePlugins: Map[String, ClassAndInfo[Plugin[_, _]]] = manager.plugins
-  println(s"AVAILABLE STANDARD PLUGINS: \n$loadablePlugins")
+  val manager: PluginManager                     = new PluginManager(ConfigUtil.getConfig("manager", conf))
+  val loadablePlugins: Map[String, ClassAndInfo] = manager.plugins
+  println(s"AVAILABLE STANDARD PLUGINS: \n${loadablePlugins.keys}")
 
   def execute[T](source: (String, Config) => Either[Throwable, SourcePlugin[T]],
                  filter: (String, Config) => Either[Throwable, FlowPlugin[T, T]],
@@ -84,7 +87,7 @@ object Entry extends App {
   println(s"COMPLETED: $output")
 }
 
-final case class ClassAndInfo[P <: Plugin[_, _]](clazz: ClassTag[P], info: ClassInfo)
+final case class ClassAndInfo(clazz: Class[_], info: ClassInfo)
 
 class PluginManager(managerConfig: Config) {
 
@@ -97,14 +100,14 @@ class PluginManager(managerConfig: Config) {
   private val classMap: Map[String, ClassInfo] = ClassFinder.classInfoMap(finder.getClasses)
 
   // All loadable plugins available for use
-  val plugins: Map[String, ClassAndInfo[Plugin[_, _]]] =
+  val plugins: Map[String, ClassAndInfo] =
     ClassFinder
       .concreteSubclasses(classOf[Plugin[_, _]], classMap)
-      .foldLeft(Map[String, ClassAndInfo[Plugin[_, _]]]()) { (m, i) =>
+      .foldLeft(Map[String, ClassAndInfo]()) { (m, i) =>
         {
           // Filter out classes that are not in the current classloader
           Try(Class.forName(i.name)) match {
-            case Success(p) => m + (i.name -> ClassAndInfo(ClassTag(p), i))
+            case Success(p) => m + (i.name -> ClassAndInfo(p, i))
             case _          => m
           }
         }
@@ -142,7 +145,7 @@ class PluginManager(managerConfig: Config) {
   private def makePlugin[P <: Plugin[_, _]](name: String, config: Config): Either[Throwable, P] =
     for {
       infoEntry   <- plugins.get(name).toRight(PluginLoadingException(s"No plugin by name '$name' found."))
-      plugin      <- Try(infoEntry.clazz.runtimeClass.getConstructor(classOf[Config]).newInstance(config)).toEither
+      plugin      <- Try(infoEntry.clazz.getConstructor(classOf[Config]).newInstance(config)).toEither
       typedPlugin <- Try(plugin.asInstanceOf[P]).toEither
     } yield typedPlugin
 }
