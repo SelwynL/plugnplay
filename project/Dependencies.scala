@@ -13,6 +13,7 @@ object Dependencies {
     val enumeratum = "1.5.13"
     val typesafe   = "1.3.2"
     val classutil  = "1.3.0"
+    val jsonitor   = "0.36.4"
 
     // Test
     val scalatest  = "3.0.5"
@@ -20,10 +21,12 @@ object Dependencies {
 
   val Libraries = Seq(
     // Compile
-    "com.beachape"    %% "enumeratum" % V.enumeratum,
-    "org.clapper"     %% "classutil"  % V.classutil,
-    "org.apache.avro" %  "avro"       % V.avro,
-    "com.typesafe"    %  "config"     % V.typesafe,
+    "org.apache.avro"                       %  "avro"                   % V.avro,
+    "com.typesafe"                          %  "config"                 % V.typesafe,
+    "com.beachape"                          %% "enumeratum"             % V.enumeratum,
+    "org.clapper"                           %% "classutil"              % V.classutil,
+    "com.github.plokhotnyuk.jsoniter-scala" %% "jsoniter-scala-core"    % V.jsonitor,
+    "com.github.plokhotnyuk.jsoniter-scala" %% "jsoniter-scala-macros"  % V.jsonitor % Provided,
 
     // Test
     "org.scalatest" %% "scalatest" % V.scalatest % "test"

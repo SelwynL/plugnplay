@@ -1,10 +1,11 @@
 package org.selwyn.plugnplay.config
 
-import com.typesafe.config.{Config, ConfigFactory}
+import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 
 import scala.util.Try
 
 object SafeConfig {
+
   private def tryGet[T](key: String, get: String => T): Option[T] =
     Try(get(key)).toOption
 
@@ -19,4 +20,11 @@ object SafeConfig {
     */
   def getConfig(key: String, config: Config): Config =
     getConfigOption(key, config).getOrElse(ConfigFactory.empty())
+
+//  import org.json4s.DefaultFormats
+//  import org.json4s.native.JsonMethods._
+//  implicit val format = DefaultFormats
+//  def convert[T](c: Config): Either[Throwable, T] =
+//    Try(parse(c.root().render(ConfigRenderOptions.concise())).extract[T]).toEither
+
 }
